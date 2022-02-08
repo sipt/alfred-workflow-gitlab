@@ -6,10 +6,13 @@ import (
 	"log"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/xanzy/go-gitlab"
+
+	aw "github.com/deanishe/awgo"
 )
 
 func init() {
@@ -24,12 +27,14 @@ func init() {
 				}
 				run(query)
 			})
+			wf.SendFeedback()
 		},
 	}, &cobra.Command{
 		Use:   "setprojects",
 		Short: "download projects",
 		Run: func(cmd *cobra.Command, args []string) {
 			wf.Run(DownloadProjects)
+			wf.SendFeedback()
 		},
 	})
 }
@@ -51,10 +56,12 @@ func run(query string) {
 		go DownloadProjectsInBg()
 	}
 	var count = 0
-	query = strings.ToLower(query)
+	query = strings.Replace(strings.ToLower(query), " ", "", -1)
 	for _, project := range projects {
-		if query == "" || strings.Contains(strings.ToLower(project.Name), query) {
-			wf.NewItem(project.Name).Arg(project.WebUrl).Valid(true)
+		if query == "" || strings.Contains(strings.Replace(strings.ToLower(project.Name), " ", "", -1), query) {
+			wf.NewItem(project.Name).Arg(project.WebUrl).Valid(true).Icon(&aw.Icon{
+				Value: "icon.png",
+			})
 			count++
 			if count >= 20 {
 				break
@@ -67,7 +74,7 @@ func DownloadProjectsInBg() {
 	if wf.IsRunning("download_projects") {
 		return
 	}
-	execCmd := exec.Command("awgitlab", "setprojects")
+	execCmd := exec.Command("./awgitlab", "setprojects")
 	err := wf.RunInBackground("download_projects", execCmd)
 	if err != nil {
 		log.Println("run download_projects job failed.", err)
@@ -75,15 +82,51 @@ func DownloadProjectsInBg() {
 }
 
 func DownloadProjects() {
+	if err := valid(); err != nil {
+		return
+	}
 	git, err := gitlab.NewClient(accessToken, gitlab.WithBaseURL(fmt.Sprintf("https://%s/api/v4", domain)))
 	if err != nil {
 		log.Fatalf("Failed to create client: %v", err)
 	}
+	projects, resp, err := fetchProjects(git, 0)
+	if err != nil {
+		log.Fatalf("Failed to fetchProjects: %v", err)
+	}
+	results := make(chan []*Project, resp.TotalPages)
+	wg := &sync.WaitGroup{}
+	for i := resp.NextPage; i <= resp.TotalPages; i++ {
+		wg.Add(1)
+		go func(page int) {
+			projects, _, err := fetchProjects(git, page)
+			if err != nil {
+				log.Fatalf("Failed to fetchProjects: %v", err)
+			}
+			results <- projects
+			wg.Done()
+		}(i)
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	for result := range results {
+		projects = append(projects, result...)
+	}
+	err = wf.Cache.StoreJSON("projects", projects)
+	if err != nil {
+		log.Println("store projects failed.", err.Error())
+	}
+
+	return
+}
+
+func fetchProjects(git *gitlab.Client, page int) ([]*Project, *gitlab.Response, error) {
 	var simple = true
-	list, _, err := git.Projects.ListProjects(&gitlab.ListProjectsOptions{Simple: &simple})
+	list, resp, err := git.Projects.ListProjects(&gitlab.ListProjectsOptions{ListOptions: gitlab.ListOptions{Page: page, PerPage: 100}, Simple: &simple})
 	if err != nil {
 		log.Println("Get projects failed.", err.Error())
-		return
+		return nil, nil, err
 	}
 	projects := make([]*Project, len(list))
 	for i, project := range list {
@@ -93,25 +136,25 @@ func DownloadProjects() {
 			WebUrl: project.WebURL,
 		}
 	}
-	err = wf.Cache.StoreJSON("projects", projects)
-	if err != nil {
-		log.Println("store projects failed.", err.Error())
-	}
-	return
+	return projects, resp, nil
 }
 
 func valid() error {
 	data, err := wf.Cache.Load("domain")
 	if err != nil || len(data) == 0 {
-		log.Println("[domain] not found.")
-		wf.NewWarningItem("Please set GitLab Domain.", "")
+		log.Println("[domain] not found.", err)
+		wf.NewWarningItem("Please set GitLab Domain.", "").Icon(&aw.Icon{
+			Value: "icon.png",
+		})
 		return errors.New("[domain] not found")
 	}
 	domain = string(data)
 	data, err = wf.Cache.Load("access_token")
 	if err != nil || len(data) == 0 {
 		log.Println("[access_token] not found.")
-		wf.NewWarningItem("Please set GitLab AccessToken.", "")
+		wf.NewWarningItem("Please set GitLab AccessToken.", "").Icon(&aw.Icon{
+			Value: "icon.png",
+		})
 		return errors.New("[access_token] not found")
 	}
 	accessToken = string(data)
