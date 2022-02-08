@@ -22,6 +22,10 @@ func init() {
 					wf.NewWarningItem("Set GitLab Domain failed", err.Error())
 					return
 				}
+				if err := valid(); err != nil {
+					return
+				}
+				DownloadProjectsInBg()
 			})
 		},
 	})
