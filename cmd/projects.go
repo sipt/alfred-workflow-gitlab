@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -57,15 +58,33 @@ func run(query string) {
 	}
 	var count = 0
 	query = strings.Replace(strings.ToLower(query), " ", "", -1)
+	filtered := make([]*Project, 0)
 	for _, project := range projects {
 		if query == "" || strings.Contains(strings.Replace(strings.ToLower(project.Name), " ", "", -1), query) {
-			wf.NewItem(project.Name).Arg(project.WebUrl).Valid(true).Icon(&aw.Icon{
-				Value: "icon.png",
-			})
-			count++
-			if count >= 20 {
-				break
-			}
+			filtered = append(filtered, project)
+		}
+	}
+	items := make([]Item, 0)
+	_ = wf.Cache.LoadJSON("mru", &items)
+	itemMap := make(map[string]Item)
+	for _, item := range items {
+		itemMap[item.URL] = item
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		if itemMap[filtered[i].WebUrl].Latest > itemMap[filtered[j].WebUrl].Latest {
+			return true
+		} else if itemMap[filtered[i].WebUrl].Latest == itemMap[filtered[j].WebUrl].Latest {
+			return filtered[i].Name < filtered[j].Name
+		}
+		return false
+	})
+	for _, project := range filtered {
+		wf.NewItem(project.Name).Arg(project.WebUrl).Valid(true).Icon(&aw.Icon{
+			Value: "icon.png",
+		})
+		count++
+		if count >= 20 {
+			break
 		}
 	}
 }
